@@ -23,6 +23,11 @@ final class Monitor: ObservableObject {
     @Published var sshHost = "maseehurs-imac.tailc5b5ab.ts.net"
 
     let nativePrefixes = ["com.besttt."]
+    /// Native macOS apps (not Docker, no com.besttt. label) tracked by process
+    /// pattern. Add more here to surface other background apps.
+    let nativeApps = [
+        NativeApp(name: "Jellyfin", pattern: "/Applications/Jellyfin.app/")
+    ]
     private let historyLength = 40
     private var cpuHistory: [String: [Double]] = [:]
     private var netHistory: [String: [Double]] = [:]
@@ -75,7 +80,8 @@ final class Monitor: ObservableObject {
 
         let activeRunner = runner
         let docker = DockerCollector(runner: activeRunner)
-        let native = ProcessCollector(runner: activeRunner, prefixes: nativePrefixes)
+        let native = ProcessCollector(runner: activeRunner,
+                                      prefixes: nativePrefixes, apps: nativeApps)
 
         do {
             // Docker is the headline source; if it fails we surface the error.

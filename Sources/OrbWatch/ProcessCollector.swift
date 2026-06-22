@@ -1,30 +1,56 @@
 import Foundation
 
-/// Collects native (non-Docker) workloads: launchd jobs whose label matches a
-/// configured prefix and that currently have a live PID — e.g. the yt-dlp GUI
-/// (`com.besttt.ytdlp-gui`). Resource numbers come from `ps`.
+/// A native macOS app (not a `com.besttt.` launchd job and not Docker) to track
+/// by matching its processes with `pgrep -f`. All matching PIDs are aggregated
+/// into a single workload row — e.g. Jellyfin runs as a wrapper + server pair.
+struct NativeApp {
+    let name: String
+    /// `pgrep -f` pattern matched against the full command line.
+    let pattern: String
+}
+
+/// Collects native (non-Docker) workloads from two sources: launchd jobs whose
+/// label matches a configured prefix (e.g. the yt-dlp GUI `com.besttt.ytdlp-gui`)
+/// and named apps matched by `pgrep` (e.g. Jellyfin). Resource numbers from `ps`.
 struct ProcessCollector {
     let runner: CommandRunner
     /// launchd label prefixes to surface, e.g. ["com.besttt."].
     let prefixes: [String]
+    /// Named native apps to surface by process pattern, e.g. Jellyfin.
+    var apps: [NativeApp] = []
+
+    private typealias Stat = (cpu: Double, mem: Double, rss: UInt64,
+                              etime: String, comm: String)
 
     func collect() async throws -> [Workload] {
-        guard !prefixes.isEmpty else { return [] }
-
-        // `launchctl list` columns: PID  STATUS  LABEL
-        let listOut = try await runner.run("launchctl list")
+        // launchd jobs matching a prefix. `launchctl list` cols: PID STATUS LABEL
         var jobs: [(pid: Int, label: String)] = []
-        for line in listOut.split(whereSeparator: \.isNewline) {
-            let cols = line.split(whereSeparator: \.isWhitespace).map(String.init)
-            guard cols.count >= 3, let pid = Int(cols[0]) else { continue }
-            let label = cols[2]
-            guard prefixes.contains(where: { label.hasPrefix($0) }) else { continue }
-            jobs.append((pid, label))
+        if !prefixes.isEmpty {
+            let listOut = try await runner.run("launchctl list")
+            for line in listOut.split(whereSeparator: \.isNewline) {
+                let cols = line.split(whereSeparator: \.isWhitespace).map(String.init)
+                guard cols.count >= 3, let pid = Int(cols[0]) else { continue }
+                let label = cols[2]
+                guard prefixes.contains(where: { label.hasPrefix($0) }) else { continue }
+                jobs.append((pid, label))
+            }
         }
-        guard !jobs.isEmpty else { return [] }
 
-        // One ps call for all PIDs: pid %cpu %mem rss(KiB) etime command
-        let pidList = jobs.map { String($0.pid) }.joined(separator: ",")
+        // Named apps: one `pgrep -f` per app → its set of live PIDs.
+        var appHits: [(app: NativeApp, pids: [Int])] = []
+        for app in apps {
+            guard let out = try? await runner.run(
+                "pgrep -f '\(app.pattern)'") else { continue }
+            let pids = out.split(whereSeparator: \.isNewline)
+                .compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+            if !pids.isEmpty { appHits.append((app, pids)) }
+        }
+
+        let allPIDs = Set(jobs.map(\.pid) + appHits.flatMap(\.pids))
+        guard !allPIDs.isEmpty else { return [] }
+
+        // One ps call for every PID: pid %cpu %mem rss(KiB) etime command
+        let pidList = allPIDs.map(String.init).joined(separator: ",")
         let psOut = try await runner.run(
             "ps -p \(pidList) -o pid=,pcpu=,pmem=,rss=,etime=,comm=")
 
@@ -32,8 +58,7 @@ struct ProcessCollector {
         // "procname.PID,bytes_in,bytes_out,". Best-effort — skip if it fails.
         let netByPID = await networkByPID()
 
-        var statsByPID: [Int: (cpu: Double, mem: Double, rss: UInt64,
-                               etime: String, comm: String)] = [:]
+        var statsByPID: [Int: Stat] = [:]
         for line in psOut.split(whereSeparator: \.isNewline) {
             let f = line.split(whereSeparator: \.isWhitespace).map(String.init)
             guard f.count >= 6, let pid = Int(f[0]) else { continue }
@@ -47,7 +72,7 @@ struct ProcessCollector {
             )
         }
 
-        return jobs.map { job in
+        var rows = jobs.map { job in
             let short = job.label
                 .replacingOccurrences(of: "com.besttt.", with: "")
             var w = Workload(
@@ -74,6 +99,42 @@ struct ProcessCollector {
             }
             return w
         }
+
+        // One aggregated row per named app: sum CPU/mem/net across its PIDs,
+        // report the longest-running PID's uptime.
+        for hit in appHits {
+            var cpu = 0.0, memPct = 0.0
+            var rss: UInt64 = 0
+            var rx: UInt64 = 0, tx: UInt64 = 0
+            var haveNet = false
+            var longest = -1, longestEtime = ""
+            for pid in hit.pids {
+                if let s = statsByPID[pid] {
+                    cpu += s.cpu; memPct += s.mem; rss += s.rss
+                    let secs = etimeSeconds(s.etime)
+                    if secs > longest { longest = secs; longestEtime = s.etime }
+                }
+                if let n = netByPID[pid] { rx += n.in; tx += n.out; haveNet = true }
+            }
+            let procWord = hit.pids.count == 1 ? "proc" : "procs"
+            var w = Workload(
+                id: "app:\(hit.app.name)",
+                name: hit.app.name,
+                kind: .native,
+                state: .running,
+                statusText: "running (\(hit.pids.count) \(procWord))",
+                cpuPercent: cpu,
+                memBytes: rss
+            )
+            w.pids = hit.pids.count
+            w.memPercent = memPct
+            w.uptime = longest >= 0 ? humanizeETime(longestEtime) : nil
+            w.detail = "native app  ·  pids \(hit.pids.sorted().map(String.init).joined(separator: ", "))"
+            if haveNet { w.netRx = rx; w.netTx = tx }
+            rows.append(w)
+        }
+
+        return rows
     }
 
     private func networkByPID() async -> [Int: (in: UInt64, out: UInt64)] {
@@ -90,6 +151,22 @@ struct ProcessCollector {
                         UInt64(f[2].trimmingCharacters(in: .whitespaces)) ?? 0)
         }
         return map
+    }
+
+    /// "10:59:32" / "04-00:09:13" -> total elapsed seconds (for picking the
+    /// longest-running PID of an aggregated app).
+    private func etimeSeconds(_ etime: String) -> Int {
+        var days = 0
+        var rest = etime
+        if let dash = etime.firstIndex(of: "-") {
+            days = Int(etime[..<dash]) ?? 0
+            rest = String(etime[etime.index(after: dash)...])
+        }
+        let p = rest.split(separator: ":").map { Int($0) ?? 0 }
+        let h = p.count == 3 ? p[0] : 0
+        let m = p.count >= 2 ? p[p.count - 2] : 0
+        let s = p.last ?? 0
+        return ((days * 24 + h) * 60 + m) * 60 + s
     }
 
     /// "10:59:32" / "04-00:09:13" -> "10h 59m" / "4d 0h"
