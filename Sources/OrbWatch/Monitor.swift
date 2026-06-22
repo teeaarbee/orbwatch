@@ -20,7 +20,9 @@ final class Monitor: ObservableObject {
     @Published var connection: Connection = .local {
         didSet { rebuildRunner() }
     }
-    @Published var sshHost = "maseehurs-imac.tailc5b5ab.ts.net"
+    /// Set in the UI (settings → Source: SSH host). e.g. a Tailscale MagicDNS
+    /// name like `my-mac.tailnet-name.ts.net`, or any host reachable over SSH.
+    @Published var sshHost = ""
 
     let nativePrefixes = ["com.besttt."]
     /// Native macOS apps (not Docker, no com.besttt. label) tracked by process
