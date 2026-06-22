@@ -1,0 +1,12 @@
+# Swift / SwiftPM build artifacts
+.build/
+*.swiftpm
+.swiftpm/
+
+# Packaged app + generated icon assets
+OrbWatch.app/
+*.icns
+*.iconset/
+
+# macOS
+.DS_Store
