@@ -8,7 +8,7 @@ table with live CPU, memory, network throughput, block I/O, status, uptime, and 
 per-row sparklines. It's a lightweight SwiftUI app (no Electron, no menu-bar clutter) that
 builds with just the Command Line Tools.
 
-![overview](docs/placeholder.png)
+![OrbWatch — live dashboard of Docker containers and native services](docs/orbwatch.png)
 
 ## Why
 
