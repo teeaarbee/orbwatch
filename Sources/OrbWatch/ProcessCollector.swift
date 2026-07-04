@@ -9,6 +9,15 @@ struct NativeApp {
     let pattern: String
 }
 
+/// A launchd job to always surface with a friendly display name — including
+/// when it's loaded but not currently running (e.g. a scheduled daily job like
+/// `com.besttt.subtitle-sync` that only spins up its PID at 04:00). Without this
+/// such jobs are invisible between runs since the prefix filter needs a live PID.
+struct TrackedService {
+    let label: String   // full launchd label, e.g. "com.besttt.subtitle-sync"
+    let name: String    // friendly display name, e.g. "Subtitle Sync"
+}
+
 /// Collects native (non-Docker) workloads from two sources: launchd jobs whose
 /// label matches a configured prefix (e.g. the yt-dlp GUI `com.besttt.ytdlp-gui`)
 /// and named apps matched by `pgrep` (e.g. Jellyfin). Resource numbers from `ps`.
@@ -18,19 +27,26 @@ struct ProcessCollector {
     let prefixes: [String]
     /// Named native apps to surface by process pattern, e.g. Jellyfin.
     var apps: [NativeApp] = []
+    /// launchd jobs to always surface (friendly-named, shown even when idle).
+    var services: [TrackedService] = []
 
     private typealias Stat = (cpu: Double, mem: Double, rss: UInt64,
                               etime: String, comm: String)
 
     func collect() async throws -> [Workload] {
         // launchd jobs matching a prefix. `launchctl list` cols: PID STATUS LABEL
+        // (PID is "-" for a loaded-but-not-running job). Track the set of loaded
+        // labels too, so tracked services can be surfaced while idle.
         var jobs: [(pid: Int, label: String)] = []
-        if !prefixes.isEmpty {
+        var loadedLabels = Set<String>()
+        if !prefixes.isEmpty || !services.isEmpty {
             let listOut = try await runner.run("launchctl list")
             for line in listOut.split(whereSeparator: \.isNewline) {
                 let cols = line.split(whereSeparator: \.isWhitespace).map(String.init)
-                guard cols.count >= 3, let pid = Int(cols[0]) else { continue }
+                guard cols.count >= 3 else { continue }
                 let label = cols[2]
+                loadedLabels.insert(label)
+                guard let pid = Int(cols[0]) else { continue }
                 guard prefixes.contains(where: { label.hasPrefix($0) }) else { continue }
                 jobs.append((pid, label))
             }
@@ -72,9 +88,13 @@ struct ProcessCollector {
             )
         }
 
+        // Friendly display names for tracked launchd labels.
+        let nameFor = Dictionary(services.map { ($0.label, $0.name) },
+                                 uniquingKeysWith: { a, _ in a })
+
         var rows = jobs.map { job in
-            let short = job.label
-                .replacingOccurrences(of: "com.besttt.", with: "")
+            let short = nameFor[job.label]
+                ?? job.label.replacingOccurrences(of: "com.besttt.", with: "")
             var w = Workload(
                 id: "native:\(job.label)",
                 name: short,
@@ -131,6 +151,26 @@ struct ProcessCollector {
             w.uptime = longest >= 0 ? humanizeETime(longestEtime) : nil
             w.detail = "native app  ·  pids \(hit.pids.sorted().map(String.init).joined(separator: ", "))"
             if haveNet { w.netRx = rx; w.netTx = tx }
+            rows.append(w)
+        }
+
+        // Tracked services that aren't running right now: surface them anyway so
+        // scheduled jobs (e.g. the daily subtitle-sync) stay on the dashboard.
+        // A loaded label with no live PID is "idle" (waiting for its next fire);
+        // an entirely missing label is "not loaded".
+        let runningLabels = Set(jobs.map(\.label))
+        for svc in services where !runningLabels.contains(svc.label) {
+            let loaded = loadedLabels.contains(svc.label)
+            var w = Workload(
+                id: "native:\(svc.label)",
+                name: svc.name,
+                kind: .native,
+                state: loaded ? .idle : .exited,
+                statusText: loaded ? "loaded · idle (scheduled)" : "not loaded",
+                cpuPercent: 0,
+                memBytes: 0
+            )
+            w.detail = svc.label
             rows.append(w)
         }
 

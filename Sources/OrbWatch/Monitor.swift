@@ -30,6 +30,15 @@ final class Monitor: ObservableObject {
     let nativeApps = [
         NativeApp(name: "Jellyfin", pattern: "/Applications/Jellyfin.app/")
     ]
+    /// launchd services to always surface with a friendly name — shown even when
+    /// idle. box-to-drive & thumbnailvault are resident (also caught by the
+    /// prefix); subtitle-sync is a daily scheduled job, invisible between runs
+    /// without this. Add more curated services here.
+    let trackedServices = [
+        TrackedService(label: "com.besttt.box-to-drive",   name: "Box → Drive"),
+        TrackedService(label: "com.besttt.subtitle-sync",  name: "Subtitle Sync"),
+        TrackedService(label: "com.besttt.thumbnailvault", name: "Thumbnail Vault"),
+    ]
     private let historyLength = 40
     private var cpuHistory: [String: [Double]] = [:]
     private var netHistory: [String: [Double]] = [:]
@@ -83,7 +92,8 @@ final class Monitor: ObservableObject {
         let activeRunner = runner
         let docker = DockerCollector(runner: activeRunner)
         let native = ProcessCollector(runner: activeRunner,
-                                      prefixes: nativePrefixes, apps: nativeApps)
+                                      prefixes: nativePrefixes, apps: nativeApps,
+                                      services: trackedServices)
 
         do {
             // Docker is the headline source; if it fails we surface the error.

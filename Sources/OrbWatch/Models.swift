@@ -15,6 +15,8 @@ enum WorkloadKind: String {
 
 enum RunState {
     case running
+    case idle        // launchd job loaded but not currently running (e.g. a
+                     // scheduled daily job waiting for its next fire)
     case exited
     case restarting
     case paused
@@ -38,6 +40,7 @@ enum RunState {
     var color: Color {
         switch self {
         case .running: return .green
+        case .idle: return .teal
         case .exited, .dead: return .red
         case .restarting, .created: return .orange
         case .paused: return .yellow
@@ -48,12 +51,13 @@ enum RunState {
     var sortRank: Int {
         switch self {
         case .running: return 0
-        case .restarting: return 1
-        case .paused: return 2
-        case .created: return 3
-        case .exited: return 4
-        case .dead: return 5
-        case .unknown: return 6
+        case .idle: return 1
+        case .restarting: return 2
+        case .paused: return 3
+        case .created: return 4
+        case .exited: return 5
+        case .dead: return 6
+        case .unknown: return 7
         }
     }
 }

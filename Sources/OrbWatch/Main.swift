@@ -60,6 +60,7 @@ enum SelfTest {
     private static func label(_ s: RunState) -> String {
         switch s {
         case .running: return "running"
+        case .idle: return "idle"
         case .exited: return "exited"
         case .restarting: return "restart"
         case .paused: return "paused"
